@@ -1,0 +1,428 @@
+#!/usr/bin/python3
+"""Jabra Link helper for the Omarchy bar plugin.
+
+Talks to the USB dongle (Jabra Link 390 on this desk) through sysfs,
+PipeWire/Pulse, and the HID input node. Vendor HID (noise cancelling
+from the desktop) needs hidraw access; without it the panel still
+shows the tap cheatsheet and volume/mute.
+"""
+from __future__ import annotations
+
+import json
+import os
+import select
+import sys
+import time
+from pathlib import Path
+
+VENDOR = "0b0e"
+JABRA_HINTS = ("jabra", "gn netcom", "link 390", "link 380")
+
+
+def _now() -> float:
+  return time.time()
+
+
+def _run(cmd: list[str], timeout: float = 2.5) -> tuple[int, str, str]:
+  import subprocess
+  try:
+    proc = subprocess.run(
+      cmd, check=False, capture_output=True, text=True, timeout=timeout
+    )
+  except (OSError, subprocess.TimeoutExpired) as err:
+    return 1, "", str(err)
+  return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _pactl_json(kind: str) -> list:
+  code, out, _err = _run(["pactl", "-f", "json", "list", kind])
+  if code != 0 or not out.strip():
+    return []
+  try:
+    data = json.loads(out)
+  except json.JSONDecodeError:
+    return []
+  return data if isinstance(data, list) else []
+
+
+def _is_jabra_text(*parts: str) -> bool:
+  blob = " ".join(parts).lower()
+  return any(hint in blob for hint in JABRA_HINTS)
+
+
+def _volume_of(node: dict) -> float:
+  vol = node.get("volume") or {}
+  percents = []
+  for _ch, info in vol.items():
+    if not isinstance(info, dict):
+      continue
+    raw = str(info.get("value_percent") or "").strip().rstrip("%")
+    try:
+      percents.append(float(raw) / 100.0)
+    except ValueError:
+      continue
+  if not percents:
+    return 0.0
+  return max(0.0, min(1.0, sum(percents) / len(percents)))
+
+
+def scan_usb() -> dict:
+  """Find a GN Netcom / Jabra USB audio+HID device in sysfs."""
+  base = Path("/sys/bus/usb/devices")
+  if not base.is_dir():
+    return {}
+  for dev in base.iterdir():
+    vid = _read_text(dev / "idVendor")
+    if vid != VENDOR:
+      continue
+    product = _read_text(dev / "product") or "Jabra"
+    serial = _read_text(dev / "serial")
+    pid = _read_text(dev / "idProduct")
+    return {
+      "connected": True,
+      "name": product.strip() or "Jabra",
+      "productId": pid,
+      "serial": serial,
+      "sysfs": str(dev),
+    }
+  return {}
+
+
+def _read_text(path: Path) -> str:
+  try:
+    return path.read_text(encoding="utf-8", errors="replace").strip()
+  except OSError:
+    return ""
+
+
+def hidraw_status() -> dict:
+  """Whether we can open the Jabra vendor HID node."""
+  hidraw = Path("/sys/class/hidraw")
+  if not hidraw.is_dir():
+    return {"hidAccess": "missing", "hidraw": ""}
+  for node in sorted(hidraw.glob("hidraw*")):
+    uevent = _read_text(node / "device" / "uevent")
+    if "00000B0E:" not in uevent.upper() and "JABRA" not in uevent.upper():
+      continue
+    dev = Path("/dev") / node.name
+    info = {"hidraw": str(dev), "hidAccess": "denied"}
+    try:
+      fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+      return info
+    os.close(fd)
+    info["hidAccess"] = "ok"
+    return info
+  return {"hidAccess": "missing", "hidraw": ""}
+
+
+def pulse_status() -> dict:
+  sinks = _pactl_json("sinks")
+  sources = _pactl_json("sources")
+  code, default_sink, _ = _run(["pactl", "get-default-sink"])
+  default_sink = default_sink.strip() if code == 0 else ""
+  code, default_source, _ = _run(["pactl", "get-default-source"])
+  default_source = default_source.strip() if code == 0 else ""
+
+  sink = next((s for s in sinks if _is_jabra_text(s.get("name", ""), s.get("description", "")) and "monitor" not in str(s.get("name", "")).lower()), None)
+  source = next((s for s in sources if _is_jabra_text(s.get("name", ""), s.get("description", "")) and "monitor" not in str(s.get("name", "")).lower()), None)
+
+  out = {
+    "sinkName": "",
+    "sinkDescription": "",
+    "sourceName": "",
+    "defaultSink": False,
+    "volume": 0.0,
+    "muted": False,
+    "micMuted": False,
+    "audio": False,
+  }
+  if sink:
+    name = str(sink.get("name") or "")
+    out["sinkName"] = name
+    out["sinkDescription"] = str(sink.get("description") or "")
+    out["defaultSink"] = name == default_sink
+    out["volume"] = _volume_of(sink)
+    out["muted"] = bool(sink.get("mute"))
+    out["audio"] = True
+  if source:
+    out["sourceName"] = str(source.get("name") or "")
+    out["micMuted"] = bool(source.get("mute"))
+  return out
+
+
+def find_evdev() -> str:
+  try:
+    from evdev import InputDevice, list_devices
+  except ImportError:
+    return ""
+  for path in list_devices():
+    try:
+      dev = InputDevice(path)
+    except OSError:
+      continue
+    if _is_jabra_text(dev.name or ""):
+      return path
+  return ""
+
+
+KEY_LABELS = {
+  "KEY_PLAYPAUSE": "Play / pause",
+  "KEY_PLAY": "Play",
+  "KEY_PAUSE": "Pause",
+  "KEY_NEXTSONG": "Next track",
+  "KEY_PREVIOUSSONG": "Previous track",
+  "KEY_STOPCD": "Stop",
+  "KEY_VOLUMEUP": "Volume up",
+  "KEY_VOLUMEDOWN": "Volume down",
+  "KEY_MUTE": "Mute",
+  "KEY_MICMUTE": "Mute microphone",
+}
+
+
+def key_label(code: str) -> str:
+  return KEY_LABELS.get(code, code.replace("KEY_", "").replace("_", " ").title())
+
+
+def snapshot(last_gesture: dict | None = None) -> dict:
+  usb = scan_usb()
+  pulse = pulse_status()
+  hid = hidraw_status()
+  connected = bool(usb) or bool(pulse.get("audio"))
+  name = usb.get("name") or pulse.get("sinkDescription") or "Jabra"
+  if " " in name:
+    name = name.strip()
+  return {
+    "ok": True,
+    "connected": connected,
+    "name": name,
+    "headset": "Evolve2 Buds",
+    "dongle": usb.get("name") or ("Jabra Link 390" if connected else ""),
+    "serial": usb.get("serial") or "",
+    "productId": usb.get("productId") or "",
+    "hidAccess": hid.get("hidAccess") or "missing",
+    "hidraw": hid.get("hidraw") or "",
+    "sinkName": pulse.get("sinkName") or "",
+    "sourceName": pulse.get("sourceName") or "",
+    "defaultSink": bool(pulse.get("defaultSink")),
+    "volume": pulse.get("volume") or 0.0,
+    "muted": bool(pulse.get("muted")),
+    "micMuted": bool(pulse.get("micMuted")),
+    "battery": None,
+    "anc": None,
+    "ancControl": False,
+    "lastGesture": last_gesture,
+    "error": "" if connected else "No Jabra USB device",
+  }
+
+
+def emit(data: dict) -> None:
+  sys.stdout.write(json.dumps(data, separators=(",", ":")) + "\n")
+  sys.stdout.flush()
+
+
+def cmd_status() -> int:
+  emit(snapshot())
+  return 0
+
+
+def _need_sink(data: dict) -> str:
+  name = data.get("sinkName") or ""
+  if not name:
+    emit({"ok": False, "error": "Jabra is not an audio sink right now"})
+    return ""
+  return name
+
+
+def cmd_set_default() -> int:
+  data = snapshot()
+  name = _need_sink(data)
+  if not name:
+    return 1
+  code, _out, err = _run(["pactl", "set-default-sink", name])
+  if code != 0:
+    emit({"ok": False, "error": err.strip() or "Could not set default output"})
+    return 1
+  emit(snapshot())
+  return 0
+
+
+def cmd_mute(kind: str) -> int:
+  data = snapshot()
+  if kind == "mic":
+    name = data.get("sourceName") or ""
+    if not name:
+      emit({"ok": False, "error": "Jabra microphone is not available"})
+      return 1
+    code, _out, err = _run(["pactl", "set-source-mute", name, "toggle"])
+  else:
+    name = _need_sink(data)
+    if not name:
+      return 1
+    code, _out, err = _run(["pactl", "set-sink-mute", name, "toggle"])
+  if code != 0:
+    emit({"ok": False, "error": err.strip() or "Mute failed"})
+    return 1
+  emit(snapshot())
+  return 0
+
+
+def cmd_volume(delta: str) -> int:
+  data = snapshot()
+  name = _need_sink(data)
+  if not name:
+    return 1
+  if delta in ("up", "+"):
+    arg = "+5%"
+  elif delta in ("down", "-"):
+    arg = "-5%"
+  else:
+    try:
+      pct = int(round(float(delta) * 100)) if "." in delta else int(delta)
+    except ValueError:
+      emit({"ok": False, "error": "Volume must be up, down, or a percent"})
+      return 1
+    pct = max(0, min(150, pct))
+    arg = f"{pct}%"
+  code, _out, err = _run(["pactl", "set-sink-volume", name, arg])
+  if code != 0:
+    emit({"ok": False, "error": err.strip() or "Volume failed"})
+    return 1
+  emit(snapshot())
+  return 0
+
+
+def cmd_anc(_mode: str) -> int:
+  hid = hidraw_status()
+  if hid.get("hidAccess") != "ok":
+    emit({
+      "ok": False,
+      "error": "hid-permission",
+      "detail": "The buds cycle ANC from the left button. Desktop control needs hidraw access.",
+      "hidAccess": hid.get("hidAccess"),
+    })
+    return 2
+  emit({
+    "ok": False,
+    "error": "not-supported",
+    "detail": "These buds cycle ANC on the left button. The USB dongle does not expose a desktop ANC switch.",
+    "hidAccess": "ok",
+  })
+  return 1
+
+
+def cmd_watch() -> int:
+  last_json = ""
+  last_gesture = None
+  ev_path = ""
+  ev_dev = None
+
+  def reopen():
+    nonlocal ev_path, ev_dev
+    if ev_dev is not None:
+      try:
+        ev_dev.close()
+      except OSError:
+        pass
+      ev_dev = None
+    ev_path = find_evdev()
+    if not ev_path:
+      return
+    try:
+      from evdev import InputDevice
+      ev_dev = InputDevice(ev_path)
+    except OSError:
+      ev_dev = None
+
+  reopen()
+  next_poll = 0.0
+  while True:
+    now = _now()
+    if now >= next_poll:
+      snap = snapshot(last_gesture)
+      encoded = json.dumps(snap, separators=(",", ":"), sort_keys=True)
+      if encoded != last_json:
+        emit(snap)
+        last_json = encoded
+      next_poll = now + 1.5
+      if ev_dev is None:
+        reopen()
+
+    fds = []
+    if ev_dev is not None:
+      fds.append(ev_dev.fd)
+    timeout = max(0.05, next_poll - _now())
+    try:
+      ready, _w, _x = select.select(fds, [], [], timeout)
+    except (OSError, ValueError):
+      reopen()
+      continue
+    if not ready:
+      continue
+    try:
+      from evdev import ecodes
+      for event in ev_dev.read():
+        if event.type != ecodes.EV_KEY:
+          continue
+        if event.value != 1:
+          continue
+        try:
+          key = ecodes.KEY[event.code]
+        except KeyError:
+          key = f"KEY_{event.code}"
+        if isinstance(key, list):
+          key = key[0]
+        last_gesture = {
+          "key": key,
+          "label": key_label(key),
+          "ts": time.time(),
+        }
+        snap = snapshot(last_gesture)
+        emit(snap)
+        last_json = json.dumps(snap, separators=(",", ":"), sort_keys=True)
+        next_poll = _now() + 1.5
+    except OSError:
+      reopen()
+      last_gesture = None
+  return 0
+
+
+def usage() -> None:
+  sys.stderr.write(
+    "Usage: jabra-ctl status|watch|set-default|mute|mic-mute|volume <up|down|N>|anc <mode>\n"
+  )
+
+
+def main(argv: list[str] | None = None) -> int:
+  args = list(sys.argv[1:] if argv is None else argv)
+  if not args or args[0] in ("-h", "--help"):
+    usage()
+    return 2
+  cmd = args[0]
+  if cmd == "status":
+    return cmd_status()
+  if cmd == "watch":
+    return cmd_watch()
+  if cmd in ("set-default", "default"):
+    return cmd_set_default()
+  if cmd == "mute":
+    return cmd_mute("sink")
+  if cmd in ("mic-mute", "micmute"):
+    return cmd_mute("mic")
+  if cmd == "volume":
+    if len(args) < 2:
+      usage()
+      return 2
+    return cmd_volume(args[1])
+  if cmd == "anc":
+    mode = args[1] if len(args) > 1 else "cycle"
+    return cmd_anc(mode)
+  usage()
+  return 2
+
+
+if __name__ == "__main__":
+  try:
+    sys.exit(main())
+  except KeyboardInterrupt:
+    sys.exit(130)

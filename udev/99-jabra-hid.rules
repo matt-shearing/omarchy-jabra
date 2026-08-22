@@ -1,0 +1,3 @@
+# Jabra / GN Netcom USB HID (Link 390 and other dongles).
+# Lets the Omarchy Jabra plugin open hidraw as the logged-in user.
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b0e", MODE="0660", GROUP="input", TAG+="uaccess"

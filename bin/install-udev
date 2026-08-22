@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+# Install the Jabra hidraw udev rule. Re-execs through pkexec when not root
+# so a bar-plugin click can raise the password dialog.
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+rule_src="$here/udev/99-jabra-hid.rules"
+rule_dst=/etc/udev/rules.d/99-jabra-hid.rules
+
+if [[ $EUID -ne 0 ]]; then
+  exec pkexec "$(readlink -f "$0")" "$@"
+fi
+
+if [[ ! -f $rule_src ]]; then
+  echo "Missing $rule_src" >&2
+  exit 1
+fi
+
+install -Dm644 "$rule_src" "$rule_dst"
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=hidraw --action=add
+echo "Installed $rule_dst"

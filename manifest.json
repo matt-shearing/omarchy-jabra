@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "contra.jabra",
+  "name": "Jabra Buds",
+  "version": "1.0.0",
+  "author": "contra",
+  "license": "MIT",
+  "description": "Tap shortcuts, volume, and mute for Jabra buds on a Link 390 dongle.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Jabra Buds",
+    "description": "See every tap on the Evolve2 Buds, and mute or set them as the output.",
+    "category": "Audio",
+    "aliases": [
+      "jabra",
+      "buds",
+      "earbuds",
+      "anc",
+      "headset",
+      "link 390"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "variant": "uc"
+    },
+    "schema": [
+      {
+        "key": "variant",
+        "type": "string",
+        "label": "Bud variant (uc or teams)",
+        "defaultValue": "uc"
+      }
+    ]
+  }
+}
