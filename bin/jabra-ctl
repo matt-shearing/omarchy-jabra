@@ -226,6 +226,30 @@ def pulse_status() -> dict:
   return out
 
 
+def boost_jabra_capture() -> None:
+  """USB Mic was at 0/5 (-9 dB). Dictation needs the hardware capture open."""
+  _run(["amixer", "-q", "-c", "J390", "sset", "Mic", "5", "unmute"])
+
+
+def find_hotkey_devices() -> list:
+  """Keyboards that can start Voxtype (RIGHTCTRL / F9). Do not grab."""
+  try:
+    from evdev import InputDevice, list_devices, ecodes
+  except ImportError:
+    return []
+  found = []
+  want = {ecodes.KEY_RIGHTCTRL, ecodes.KEY_F9}
+  for path in list_devices():
+    try:
+      dev = InputDevice(path)
+    except OSError:
+      continue
+    keys = set(dev.capabilities().get(ecodes.EV_KEY, []))
+    if want & keys and not _is_jabra_text(dev.name or ""):
+      found.append(dev)
+  return found
+
+
 def find_evdev() -> str:
   try:
     from evdev import InputDevice, list_devices
@@ -409,7 +433,8 @@ def telephony_report(off_hook: bool, muted: bool = False) -> bytes:
     bits |= TELEPHONY_OFFHOOK
   if muted:
     bits |= TELEPHONY_MUTE
-  return bytes((TELEPHONY_REPORT, bits))
+  # Report ID + two data bytes. Jabra WebHID sendReport(0x02, [bits, 0]).
+  return bytes((TELEPHONY_REPORT, bits, 0))
 
 
 def voxtype_recording() -> bool:
@@ -508,7 +533,7 @@ class HidSession:
     if (
       not force
       and self.telephony_offhook == bool(off_hook)
-      and now - self.last_telephony < 4.0
+      and now - self.last_telephony < 0.2
     ):
       return True
     try:
@@ -518,6 +543,8 @@ class HidSession:
       return False
     self.telephony_offhook = bool(off_hook)
     self.last_telephony = now
+    if off_hook:
+      boost_jabra_capture()
     return True
 
 
@@ -527,19 +554,26 @@ def cmd_watch() -> int:
   last_battery = None
   ev_path = ""
   ev_dev = None
+  hotkeys = []
   hid = HidSession()
   capturing = False
   next_capture = 0.0
   sub = None
 
   def reopen():
-    nonlocal ev_path, ev_dev
+    nonlocal ev_path, ev_dev, hotkeys
     if ev_dev is not None:
       try:
         ev_dev.close()
       except OSError:
         pass
       ev_dev = None
+    for dev in hotkeys:
+      try:
+        dev.close()
+      except OSError:
+        pass
+    hotkeys = find_hotkey_devices()
     ev_path = find_evdev()
     if not ev_path:
       return
@@ -557,10 +591,14 @@ def cmd_watch() -> int:
       except OSError:
         pass
       sub = None
+    import shutil
     import subprocess
+    cmd = ["pactl", "subscribe"]
+    if shutil.which("stdbuf"):
+      cmd = ["stdbuf", "-oL", "pactl", "subscribe"]
     try:
       sub = subprocess.Popen(
-        ["pactl", "subscribe"],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -593,6 +631,8 @@ def cmd_watch() -> int:
           hid.dst = GNP_ADDRS[next_addr % len(GNP_ADDRS)]
           next_addr += 1
         hid.query()
+        if hid.telephony_offhook:
+          hid.set_telephony(True, force=True)
       probed = hid.read_available()
       if probed:
         last_battery = probed
@@ -612,6 +652,8 @@ def cmd_watch() -> int:
     fds = []
     if ev_dev is not None:
       fds.append(ev_dev.fd)
+    for dev in hotkeys:
+      fds.append(dev.fd)
     if hid.fd is not None:
       fds.append(hid.fd)
     if sub is not None and sub.stdout is not None:
@@ -636,6 +678,19 @@ def cmd_watch() -> int:
         reopen_subscribe()
       if "source-output" in line:
         sync_telephony(True)
+    for dev in list(hotkeys):
+      if dev.fd not in ready:
+        continue
+      try:
+        from evdev import ecodes
+        for event in dev.read():
+          if event.type != ecodes.EV_KEY or event.value != 1:
+            continue
+          if event.code in (ecodes.KEY_RIGHTCTRL, ecodes.KEY_F9):
+            hid.set_telephony(True, force=True)
+      except OSError:
+        reopen()
+        break
     if hid.fd is not None and hid.fd in ready:
       probed = hid.read_available()
       if probed:

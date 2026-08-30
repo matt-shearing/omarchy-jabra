@@ -121,9 +121,9 @@ class TelephonyHost(unittest.TestCase):
     loader.exec_module(cls.ctl)
 
   def test_offhook_unmute_report(self):
-    self.assertEqual(self.ctl.telephony_report(True), b"\x02\x01")
-    self.assertEqual(self.ctl.telephony_report(True, muted=True), b"\x02\x03")
-    self.assertEqual(self.ctl.telephony_report(False), b"\x02\x00")
+    self.assertEqual(self.ctl.telephony_report(True), b"\x02\x01\x00")
+    self.assertEqual(self.ctl.telephony_report(True, muted=True), b"\x02\x03\x00")
+    self.assertEqual(self.ctl.telephony_report(False), b"\x02\x00\x00")
 
   def test_voxtype_recording_state(self):
     import os

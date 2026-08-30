@@ -32,7 +32,7 @@ Pick **UC** or **Teams** at the top of the list. Those are two factory maps; Sou
 
 **Grant HID access** raises a password prompt (`pkexec`) and writes three files: hidraw access, a hwdb map that drops the dongle's `KEY_MICMUTE`, and a libinput quirk for the same. Unplug and replug the dongle if hidraw is still `Permission denied`. Volume, speaker mute, and the tap list work without that grant. Charge does not.
 
-The dongle microphone is a separate PipeWire source from any desk mic. HID access does not change how audio is routed. Ignoring `KEY_MICMUTE` only stops Hyprland from treating a dongle telephony mute report as the desktop mic-mute key. Opening the mic still puts the dongle in voice-link; the helper then sends HID Off-Hook with mute clear so the buds do not start the "call" muted and announce "muted".
+The dongle microphone is a separate PipeWire source from any desk mic. HID access does not change how audio is routed. Ignoring `KEY_MICMUTE` only stops Hyprland from treating a dongle telephony mute report as the desktop mic-mute key. Opening the mic still puts the dongle in voice-link. The helper sends a 3-byte HID Off-Hook (mute clear) on Right Ctrl / F9 and keeps it asserted while Voxtype is recording, and raises the USB Mic capture from the 0/5 floor. That is what stops the buds announcing "muted" and sending silence.
 
 ## What it talks to
 
