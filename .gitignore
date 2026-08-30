@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 *.qmlc
 .qmllint.out
+.DS_Store
+*.swp
+*.tmp

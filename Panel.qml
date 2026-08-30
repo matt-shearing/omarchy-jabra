@@ -29,7 +29,9 @@ Panel {
 
   property bool cursorActive: false
   property int focusIndex: 0
-  readonly property int controlCount: Model.hidNeedsGrant(root.status) ? 4 : 3
+  readonly property bool needsHid: Model.hidNeedsGrant(root.status)
+  readonly property int hidOffset: needsHid ? 1 : 0
+  readonly property int controlCount: 3 + hidOffset
 
   function persistVariant(value) {
     var next = Model.normalizeVariant(value)
@@ -42,14 +44,14 @@ Panel {
   }
 
   function activateFocused() {
-    if (focusIndex === 0) {
+    if (root.needsHid && focusIndex === 0) {
+      if (root.service) root.service.installUdev()
+    } else if (focusIndex === root.hidOffset) {
       if (root.service) root.service.setDefault()
-    } else if (focusIndex === 1) {
+    } else if (focusIndex === root.hidOffset + 1) {
       if (root.service) root.service.toggleMute()
-    } else if (focusIndex === 2) {
-      if (root.service) root.service.toggleMic()
-    } else if (root.status && Model.hidNeedsGrant(root.status) && root.service) {
-      root.service.installUdev()
+    } else if (root.service) {
+      root.service.toggleMic()
     }
   }
 
@@ -135,6 +137,65 @@ Panel {
             }
           }
 
+          Row {
+            id: batteryRow
+            width: parent.width
+            spacing: Style.space(12)
+
+            Text {
+              id: batteryGlyph
+              text: Model.batteryGlyph(root.status)
+              color: root.status.battery && root.status.battery.low
+                ? (root.bar ? root.bar.urgent : Color.urgent)
+                : (root.status.connected ? root.fg : root.dim)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+              verticalAlignment: Text.AlignVCenter
+              width: Style.font.display
+              height: Math.max(Style.font.display, batteryLabels.implicitHeight)
+            }
+
+            Column {
+              id: batteryLabels
+              width: parent.width - batteryGlyph.width - parent.spacing
+              spacing: Style.space(2)
+
+              Text {
+                width: parent.width
+                text: "Buds  " + Model.batteryLabel(root.status)
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+              }
+
+              Text {
+                width: parent.width
+                text: Model.batteryDetail(root.status)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+          }
+
+          Button {
+            width: parent.width
+            visible: root.needsHid
+            text: "Grant HID access"
+            iconText: String.fromCodePoint(0xF0237)
+            bordered: true
+            leftAlign: true
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            hasCursor: root.cursorActive && root.focusIndex === 0
+            onClicked: if (root.service) root.service.installUdev()
+            onHovered: function(on) {
+              if (on) { root.cursorActive = true; root.focusIndex = 0 }
+            }
+          }
+
           Text {
             width: parent.width
             visible: root.lastError !== ""
@@ -155,12 +216,12 @@ Panel {
               : "Route desktop audio to the Jabra dongle."
             checked: root.status.defaultSink
             enabled: root.status.connected && !!root.status.sinkName
-            hasCursor: root.cursorActive && root.focusIndex === 0
+            hasCursor: root.cursorActive && root.focusIndex === root.hidOffset
             foreground: root.fg
             fontFamily: root.fontFamily
             onClicked: if (root.service) root.service.setDefault()
             onHovered: function(on) {
-              if (on) { root.cursorActive = true; root.focusIndex = 0 }
+              if (on) { root.cursorActive = true; root.focusIndex = root.hidOffset }
             }
           }
 
@@ -170,12 +231,12 @@ Panel {
             description: "Right-click the chip. Scroll the chip to change volume."
             checked: root.status.muted
             enabled: root.status.connected
-            hasCursor: root.cursorActive && root.focusIndex === 1
+            hasCursor: root.cursorActive && root.focusIndex === root.hidOffset + 1
             foreground: root.fg
             fontFamily: root.fontFamily
             onClicked: if (root.service) root.service.toggleMute()
             onHovered: function(on) {
-              if (on) { root.cursorActive = true; root.focusIndex = 1 }
+              if (on) { root.cursorActive = true; root.focusIndex = root.hidOffset + 1 }
             }
           }
 
@@ -187,12 +248,12 @@ Panel {
               : "No Jabra microphone right now."
             checked: root.status.micMuted
             enabled: root.status.connected && !!root.status.sourceName
-            hasCursor: root.cursorActive && root.focusIndex === 2
+            hasCursor: root.cursorActive && root.focusIndex === root.hidOffset + 2
             foreground: root.fg
             fontFamily: root.fontFamily
             onClicked: if (root.service) root.service.toggleMic()
             onHovered: function(on) {
-              if (on) { root.cursorActive = true; root.focusIndex = 2 }
+              if (on) { root.cursorActive = true; root.focusIndex = root.hidOffset + 2 }
             }
           }
 
@@ -301,22 +362,6 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
-          }
-
-          Button {
-            width: parent.width
-            visible: Model.hidNeedsGrant(root.status)
-            text: "Grant HID access"
-            iconText: String.fromCodePoint(0xF0237)
-            bordered: true
-            leftAlign: true
-            foreground: root.fg
-            fontFamily: root.fontFamily
-            hasCursor: root.cursorActive && root.focusIndex === 3
-            onClicked: if (root.service) root.service.installUdev()
-            onHovered: function(on) {
-              if (on) { root.cursorActive = true; root.focusIndex = 3 }
-            }
           }
         }
       }

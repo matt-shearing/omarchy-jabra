@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 """Jabra Link helper for the Omarchy bar plugin.
 
-Talks to the USB dongle (Jabra Link 390 on this desk) through sysfs,
-PipeWire/Pulse, and the HID input node. Vendor HID (noise cancelling
-from the desktop) needs hidraw access; without it the panel still
-shows the tap cheatsheet and volume/mute.
+Talks to a Jabra Link 390 USB dongle through sysfs, PipeWire/Pulse,
+and the HID input node. Vendor HID (battery, and a desktop ANC probe)
+needs hidraw access; without it the panel still shows the tap
+cheatsheet and volume/mute.
 """
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ from pathlib import Path
 
 VENDOR = "0b0e"
 JABRA_HINTS = ("jabra", "gn netcom", "link 390", "link 380")
+
+# GN Protocol over HID report 5. Same layout fwupd uses for Jabra GNP
+# battery: 64-byte output/input, child headset at address 0x04.
+GNP_REPORT = 0x05
+GNP_CMD_BATTERY = 0x12
+GNP_SUB_BATTERY = 0x02
+GNP_ADDRS = (0x04, 0x01, 0x08)
+GNP_PACKET = 64
 
 
 def _now() -> float:
@@ -116,6 +124,73 @@ def hidraw_status() -> dict:
   return {"hidAccess": "missing", "hidraw": ""}
 
 
+def gnp_battery_request(dst: int, seq: int) -> bytes:
+  pkt = bytearray(GNP_PACKET)
+  pkt[0] = GNP_REPORT
+  pkt[1] = dst & 0xFF
+  pkt[2] = 0x00
+  pkt[3] = seq & 0xFF
+  pkt[4] = 0x46
+  pkt[5] = GNP_CMD_BATTERY
+  pkt[6] = GNP_SUB_BATTERY
+  return bytes(pkt)
+
+
+def parse_gnp_battery(buf: bytes | bytearray) -> dict | None:
+  """Decode a GNP battery input report. Returns None if this is not one."""
+  if not buf:
+    return None
+  data = bytes(buf)
+  if data[0] != GNP_REPORT:
+    return None
+  if len(data) < 9:
+    return None
+  if data[5] != GNP_CMD_BATTERY or data[6] != GNP_SUB_BATTERY:
+    return None
+  percent = int(data[8])
+  if percent < 1 or percent > 100:
+    return None
+  charging = False
+  low = percent <= 15
+  if len(data) > 9 and data[9] in (0, 1):
+    charging = bool(data[9])
+  if len(data) > 10 and data[10] in (0, 1):
+    low = bool(data[10])
+  return {"percent": percent, "charging": charging, "low": low}
+
+
+def query_battery(hid_path: str, dsts: tuple[int, ...] = GNP_ADDRS) -> dict | None:
+  """One-shot GNP battery read. Needs hidraw write permission."""
+  try:
+    fd = os.open(hid_path, os.O_RDWR | os.O_NONBLOCK)
+  except OSError:
+    return None
+  try:
+    seq = int(time.time()) & 0xFF
+    for dst in dsts:
+      try:
+        os.write(fd, gnp_battery_request(dst, seq))
+      except OSError:
+        return None
+      seq = (seq + 1) & 0xFF
+      deadline = _now() + 0.4
+      while _now() < deadline:
+        ready, _w, _x = select.select([fd], [], [], max(0.0, deadline - _now()))
+        if not ready:
+          continue
+        try:
+          buf = os.read(fd, GNP_PACKET)
+        except OSError:
+          break
+        parsed = parse_gnp_battery(buf)
+        if parsed:
+          parsed["address"] = dst
+          return parsed
+    return None
+  finally:
+    os.close(fd)
+
+
 def pulse_status() -> dict:
   sinks = _pactl_json("sinks")
   sources = _pactl_json("sources")
@@ -184,7 +259,11 @@ def key_label(code: str) -> str:
   return KEY_LABELS.get(code, code.replace("KEY_", "").replace("_", " ").title())
 
 
-def snapshot(last_gesture: dict | None = None) -> dict:
+def snapshot(
+  last_gesture: dict | None = None,
+  last_battery: dict | None = None,
+  probe_battery: bool = False,
+) -> dict:
   usb = scan_usb()
   pulse = pulse_status()
   hid = hidraw_status()
@@ -192,6 +271,11 @@ def snapshot(last_gesture: dict | None = None) -> dict:
   name = usb.get("name") or pulse.get("sinkDescription") or "Jabra"
   if " " in name:
     name = name.strip()
+  battery = last_battery
+  if probe_battery and hid.get("hidAccess") == "ok" and hid.get("hidraw"):
+    probed = query_battery(str(hid["hidraw"]))
+    if probed:
+      battery = probed
   return {
     "ok": True,
     "connected": connected,
@@ -208,7 +292,7 @@ def snapshot(last_gesture: dict | None = None) -> dict:
     "volume": pulse.get("volume") or 0.0,
     "muted": bool(pulse.get("muted")),
     "micMuted": bool(pulse.get("micMuted")),
-    "battery": None,
+    "battery": battery,
     "anc": None,
     "ancControl": False,
     "lastGesture": last_gesture,
@@ -222,7 +306,7 @@ def emit(data: dict) -> None:
 
 
 def cmd_status() -> int:
-  emit(snapshot())
+  emit(snapshot(probe_battery=True))
   return 0
 
 
@@ -311,11 +395,77 @@ def cmd_anc(_mode: str) -> int:
   return 1
 
 
+class HidSession:
+  """Keeps hidraw open so GNP battery reports can arrive between polls."""
+
+  def __init__(self) -> None:
+    self.fd: int | None = None
+    self.path = ""
+    self.seq = 0
+    self.dst = GNP_ADDRS[0]
+    self.last_query = 0.0
+
+  def close(self) -> None:
+    if self.fd is not None:
+      try:
+        os.close(self.fd)
+      except OSError:
+        pass
+    self.fd = None
+    self.path = ""
+
+  def ensure(self) -> bool:
+    info = hidraw_status()
+    path = str(info.get("hidraw") or "")
+    if info.get("hidAccess") != "ok" or not path:
+      self.close()
+      return False
+    if self.fd is not None and self.path == path:
+      return True
+    self.close()
+    try:
+      self.fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+      return False
+    self.path = path
+    return True
+
+  def query(self) -> None:
+    if not self.ensure() or self.fd is None:
+      return
+    self.seq = (self.seq + 1) & 0xFF
+    try:
+      os.write(self.fd, gnp_battery_request(self.dst, self.seq))
+    except OSError:
+      self.close()
+      return
+    self.last_query = _now()
+
+  def read_available(self) -> dict | None:
+    if self.fd is None:
+      return None
+    found = None
+    while True:
+      try:
+        buf = os.read(self.fd, GNP_PACKET)
+      except (BlockingIOError, OSError):
+        break
+      if not buf:
+        break
+      parsed = parse_gnp_battery(buf)
+      if parsed:
+        parsed["address"] = self.dst
+        found = parsed
+    return found
+
+
 def cmd_watch() -> int:
   last_json = ""
   last_gesture = None
+  last_battery = None
   ev_path = ""
   ev_dev = None
+  hid = HidSession()
 
   def reopen():
     nonlocal ev_path, ev_dev
@@ -336,10 +486,23 @@ def cmd_watch() -> int:
 
   reopen()
   next_poll = 0.0
+  next_addr = 0
   while True:
     now = _now()
     if now >= next_poll:
-      snap = snapshot(last_gesture)
+      if hid.ensure() and (hid.last_query == 0.0 or now - hid.last_query >= 5.0):
+        if last_battery is None:
+          hid.dst = GNP_ADDRS[next_addr % len(GNP_ADDRS)]
+          next_addr += 1
+        hid.query()
+      probed = hid.read_available()
+      if probed:
+        last_battery = probed
+        hid.dst = probed.get("address") or hid.dst
+      snap = snapshot(last_gesture, last_battery)
+      if not snap.get("connected"):
+        last_battery = None
+        snap["battery"] = None
       encoded = json.dumps(snap, separators=(",", ":"), sort_keys=True)
       if encoded != last_json:
         emit(snap)
@@ -351,13 +514,26 @@ def cmd_watch() -> int:
     fds = []
     if ev_dev is not None:
       fds.append(ev_dev.fd)
+    if hid.fd is not None:
+      fds.append(hid.fd)
     timeout = max(0.05, next_poll - _now())
     try:
       ready, _w, _x = select.select(fds, [], [], timeout)
     except (OSError, ValueError):
       reopen()
+      hid.close()
       continue
     if not ready:
+      continue
+    if hid.fd is not None and hid.fd in ready:
+      probed = hid.read_available()
+      if probed:
+        last_battery = probed
+        hid.dst = probed.get("address") or hid.dst
+        snap = snapshot(last_gesture, last_battery)
+        emit(snap)
+        last_json = json.dumps(snap, separators=(",", ":"), sort_keys=True)
+    if ev_dev is None or ev_dev.fd not in ready:
       continue
     try:
       from evdev import ecodes
@@ -377,7 +553,7 @@ def cmd_watch() -> int:
           "label": key_label(key),
           "ts": time.time(),
         }
-        snap = snapshot(last_gesture)
+        snap = snapshot(last_gesture, last_battery)
         emit(snap)
         last_json = json.dumps(snap, separators=(",", ":"), sort_keys=True)
         next_poll = _now() + 1.5

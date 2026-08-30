@@ -35,6 +35,56 @@ class HelperTests(unittest.TestCase):
     self.assertEqual(proc.returncode, 2)
 
 
+class BatteryGnp(unittest.TestCase):
+  @classmethod
+  def setUpClass(cls):
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("jabra_ctl", str(HELPER))
+    spec = importlib.util.spec_from_loader("jabra_ctl", loader)
+    cls.ctl = importlib.util.module_from_spec(spec)
+    loader.exec_module(cls.ctl)
+
+  def test_parse_valid_report(self):
+    pkt = bytearray(64)
+    pkt[0] = 0x05
+    pkt[5] = 0x12
+    pkt[6] = 0x02
+    pkt[8] = 72
+    pkt[9] = 1
+    pkt[10] = 0
+    parsed = self.ctl.parse_gnp_battery(pkt)
+    self.assertEqual(parsed["percent"], 72)
+    self.assertTrue(parsed["charging"])
+    self.assertFalse(parsed["low"])
+
+  def test_parse_rejects_empty_and_wrong_cmd(self):
+    self.assertIsNone(self.ctl.parse_gnp_battery(b""))
+    pkt = bytearray(64)
+    pkt[0] = 0x05
+    pkt[5] = 0x02
+    pkt[6] = 0x03
+    pkt[8] = 50
+    self.assertIsNone(self.ctl.parse_gnp_battery(pkt))
+
+  def test_parse_rejects_zero_percent(self):
+    pkt = bytearray(64)
+    pkt[0] = 0x05
+    pkt[5] = 0x12
+    pkt[6] = 0x02
+    pkt[8] = 0
+    self.assertIsNone(self.ctl.parse_gnp_battery(pkt))
+
+  def test_request_layout(self):
+    pkt = self.ctl.gnp_battery_request(0x04, 3)
+    self.assertEqual(len(pkt), 64)
+    self.assertEqual(pkt[0], 0x05)
+    self.assertEqual(pkt[1], 0x04)
+    self.assertEqual(pkt[3], 3)
+    self.assertEqual(pkt[5], 0x12)
+    self.assertEqual(pkt[6], 0x02)
+
+
 class CheatsheetContract(unittest.TestCase):
   def test_uc_has_left_anc(self):
     model = MODEL.read_text(encoding="utf-8")
@@ -52,6 +102,12 @@ class CheatsheetContract(unittest.TestCase):
     self.assertIn("KEY_PLAYPAUSE", model)
     self.assertIn("KEY_NEXTSONG", model)
     self.assertIn("KEY_MICMUTE", model)
+
+  def test_battery_helpers(self):
+    model = MODEL.read_text(encoding="utf-8")
+    self.assertIn("function batteryGlyph", model)
+    self.assertIn("function batteryLabel", model)
+    self.assertIn("Grant HID access to read charge.", model)
 
 
 if __name__ == "__main__":

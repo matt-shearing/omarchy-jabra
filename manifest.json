@@ -2,10 +2,19 @@
   "schemaVersion": 1,
   "id": "contra.jabra",
   "name": "Jabra Buds",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "contra",
   "license": "MIT",
-  "description": "Tap shortcuts, volume, and mute for Jabra buds on a Link 390 dongle.",
+  "description": "Charge, tap shortcuts, volume, and mute for Jabra Evolve2 Buds on a Link 390 dongle.",
+  "homepage": "https://github.com/matt-shearing/omarchy-jabra",
+  "repository": "https://github.com/matt-shearing/omarchy-jabra",
+  "keywords": [
+    "jabra",
+    "headset",
+    "earbuds",
+    "audio",
+    "battery"
+  ],
   "kinds": [
     "service",
     "bar-widget"
@@ -16,7 +25,7 @@
   },
   "barWidget": {
     "displayName": "Jabra Buds",
-    "description": "See every tap on the Evolve2 Buds, and mute or set them as the output.",
+    "description": "Charge, tap shortcuts, mute, and default output for Evolve2 Buds.",
     "category": "Audio",
     "aliases": [
       "jabra",
