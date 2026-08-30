@@ -110,5 +110,17 @@ class CheatsheetContract(unittest.TestCase):
     self.assertIn("Grant HID access to read charge.", model)
 
 
+class MicmuteIgnore(unittest.TestCase):
+  def test_hwdb_drops_telephony_mute(self):
+    text = (ROOT / "udev" / "90-jabra-micmute.hwdb").read_text(encoding="utf-8")
+    self.assertIn("evdev:input:b0003v0B0Ep2E56*", text)
+    self.assertIn("KEYBOARD_KEY_b002f=reserved", text)
+
+  def test_quirks_drop_key_micmute(self):
+    text = (ROOT / "udev" / "90-jabra-micmute.quirks").read_text(encoding="utf-8")
+    self.assertIn("MatchProduct=0x2E56", text)
+    self.assertIn("AttrEventCode=-KEY_MICMUTE", text)
+
+
 if __name__ == "__main__":
   unittest.main()

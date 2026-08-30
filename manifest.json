@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "contra.jabra",
   "name": "Jabra Buds",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "contra",
   "license": "MIT",
   "description": "Charge, tap shortcuts, volume, and mute for Jabra Evolve2 Buds on a Link 390 dongle.",

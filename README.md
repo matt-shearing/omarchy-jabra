@@ -30,9 +30,9 @@ Needs Python 3, `python-evdev`, and `pactl`. Those ship with Omarchy. You should
 
 Pick **UC** or **Teams** at the top of the list. Those are two factory maps; Sound+ MyControls can reassign music keys. Teams keys cannot.
 
-**Grant HID access** raises a password prompt (`pkexec`) and writes `/etc/udev/rules.d/99-jabra-hid.rules`. Unplug and replug the dongle if hidraw is still `Permission denied`. Volume, mute, and the tap list work without that grant. Charge does not.
+**Grant HID access** raises a password prompt (`pkexec`) and writes three files: hidraw access, a hwdb map that drops the dongle's `KEY_MICMUTE`, and a libinput quirk for the same. Unplug and replug the dongle if hidraw is still `Permission denied`. Volume, speaker mute, and the tap list work without that grant. Charge does not.
 
-The dongle microphone is a separate PipeWire source from any desk mic. HID access does not change how audio is routed.
+The dongle microphone is a separate PipeWire source from any desk mic. HID access does not change how audio is routed. Ignoring `KEY_MICMUTE` only stops Hyprland from treating a dongle telephony mute report as the desktop mic-mute key. Dictation can still use the buds; opening the mic still puts the dongle in voice-link.
 
 ## What it talks to
 
@@ -67,7 +67,7 @@ Link 380 is recognised as the same family. Other Jabra USB headsets may show vol
 omarchy plugin remove contra.jabra
 ```
 
-That takes the chip off the bar. It does not touch PipeWire. The udev rule, if you granted HID access, stays until you delete `/etc/udev/rules.d/99-jabra-hid.rules` and reload udev.
+That takes the chip off the bar. It does not touch PipeWire. The udev files, if you granted HID access, stay until you delete `/etc/udev/rules.d/99-jabra-hid.rules`, `/etc/udev/hwdb.d/90-jabra-micmute.hwdb`, and `/etc/libinput/90-jabra-micmute.quirks`, then `systemd-hwdb update` and reload udev.
 
 ## Development
 

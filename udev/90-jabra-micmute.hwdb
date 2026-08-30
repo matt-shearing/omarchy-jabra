@@ -1,0 +1,9 @@
+# Jabra Link 390 HID telephony Phone Mute (usage 0x0B002F) arrives as
+# KEY_MICMUTE. Omarchy binds that to a desktop source-mute toggle, which
+# fights the USB mixer when dictation opens the dongle mic (voice-link).
+# Speaker KEY_MUTE is left alone.
+evdev:input:b0003v0B0Ep2E50*
+evdev:input:b0003v0B0Ep2E51*
+evdev:input:b0003v0B0Ep2E56*
+evdev:input:b0003v0B0Ep2E57*
+ KEYBOARD_KEY_b002f=reserved

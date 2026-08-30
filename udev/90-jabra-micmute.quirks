@@ -1,0 +1,26 @@
+# Drop KEY_MICMUTE from Jabra Link 390 so Hyprland does not treat a
+# dongle telephony mute report as XF86AudioMicMute. Match is USB IDs;
+# the evdev name has leading spaces.
+[Jabra Link 390 ignore micmute]
+MatchBus=usb
+MatchVendor=0x0B0E
+MatchProduct=0x2E50
+AttrEventCode=-KEY_MICMUTE
+
+[Jabra Link 390 ignore micmute 2E51]
+MatchBus=usb
+MatchVendor=0x0B0E
+MatchProduct=0x2E51
+AttrEventCode=-KEY_MICMUTE
+
+[Jabra Link 390 ignore micmute 2E56]
+MatchBus=usb
+MatchVendor=0x0B0E
+MatchProduct=0x2E56
+AttrEventCode=-KEY_MICMUTE
+
+[Jabra Link 390 ignore micmute 2E57]
+MatchBus=usb
+MatchVendor=0x0B0E
+MatchProduct=0x2E57
+AttrEventCode=-KEY_MICMUTE

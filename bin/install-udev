@@ -1,12 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-# Install the Jabra hidraw udev rule. Re-execs through pkexec when not root
-# so a bar-plugin click can raise the password dialog.
+# Install Jabra hidraw access and ignore KEY_MICMUTE from the Link 390.
+# Re-execs through pkexec when not root so a bar-plugin click can raise
+# the password dialog.
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 rule_src="$here/udev/99-jabra-hid.rules"
 rule_dst=/etc/udev/rules.d/99-jabra-hid.rules
+hwdb_src="$here/udev/90-jabra-micmute.hwdb"
+hwdb_dst=/etc/udev/hwdb.d/90-jabra-micmute.hwdb
+quirks_src="$here/udev/90-jabra-micmute.quirks"
+quirks_dst=/etc/libinput/90-jabra-micmute.quirks
 
 if [[ $EUID -ne 0 ]]; then
   exec pkexec "$(readlink -f "$0")" "$@"
@@ -16,8 +21,22 @@ if [[ ! -f $rule_src ]]; then
   echo "Missing $rule_src" >&2
   exit 1
 fi
+if [[ ! -f $hwdb_src ]]; then
+  echo "Missing $hwdb_src" >&2
+  exit 1
+fi
+if [[ ! -f $quirks_src ]]; then
+  echo "Missing $quirks_src" >&2
+  exit 1
+fi
 
 install -Dm644 "$rule_src" "$rule_dst"
-udevadm control --reload-rules
+install -Dm644 "$hwdb_src" "$hwdb_dst"
+install -Dm644 "$quirks_src" "$quirks_dst"
+systemd-hwdb update
+udevadm control --reload
 udevadm trigger --subsystem-match=hidraw --action=add
+udevadm trigger --subsystem-match=input --action=add
 echo "Installed $rule_dst"
+echo "Installed $hwdb_dst"
+echo "Installed $quirks_dst"
