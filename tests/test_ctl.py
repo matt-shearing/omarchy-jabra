@@ -110,6 +110,41 @@ class CheatsheetContract(unittest.TestCase):
     self.assertIn("Grant HID access to read charge.", model)
 
 
+class TelephonyHost(unittest.TestCase):
+  @classmethod
+  def setUpClass(cls):
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("jabra_ctl", str(HELPER))
+    spec = importlib.util.spec_from_loader("jabra_ctl", loader)
+    cls.ctl = importlib.util.module_from_spec(spec)
+    loader.exec_module(cls.ctl)
+
+  def test_offhook_unmute_report(self):
+    self.assertEqual(self.ctl.telephony_report(True), b"\x02\x01")
+    self.assertEqual(self.ctl.telephony_report(True, muted=True), b"\x02\x03")
+    self.assertEqual(self.ctl.telephony_report(False), b"\x02\x00")
+
+  def test_voxtype_recording_state(self):
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+      state = Path(tmp) / "voxtype"
+      state.mkdir()
+      (state / "state").write_text("recording\n", encoding="utf-8")
+      old = os.environ.get("XDG_RUNTIME_DIR")
+      os.environ["XDG_RUNTIME_DIR"] = tmp
+      try:
+        self.assertTrue(self.ctl.voxtype_recording())
+        (state / "state").write_text("idle\n", encoding="utf-8")
+        self.assertFalse(self.ctl.voxtype_recording())
+      finally:
+        if old is None:
+          os.environ.pop("XDG_RUNTIME_DIR", None)
+        else:
+          os.environ["XDG_RUNTIME_DIR"] = old
+
+
 class MicmuteIgnore(unittest.TestCase):
   def test_hwdb_drops_telephony_mute(self):
     text = (ROOT / "udev" / "90-jabra-micmute.hwdb").read_text(encoding="utf-8")

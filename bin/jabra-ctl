@@ -395,6 +395,46 @@ def cmd_anc(_mode: str) -> int:
   return 1
 
 
+# HID report 2: telephony LED bits. Bit 0 is Off-Hook, bit 1 is Mute.
+# Linux never implements the host side, so opening the dongle mic looks
+# like a call with no unmute — the buds say "muted" and send silence.
+TELEPHONY_REPORT = 0x02
+TELEPHONY_OFFHOOK = 1 << 0
+TELEPHONY_MUTE = 1 << 1
+
+
+def telephony_report(off_hook: bool, muted: bool = False) -> bytes:
+  bits = 0
+  if off_hook:
+    bits |= TELEPHONY_OFFHOOK
+  if muted:
+    bits |= TELEPHONY_MUTE
+  return bytes((TELEPHONY_REPORT, bits))
+
+
+def voxtype_recording() -> bool:
+  runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+  try:
+    text = Path(runtime, "voxtype", "state").read_text(encoding="utf-8", errors="replace")
+  except OSError:
+    return False
+  return text.strip().lower() == "recording"
+
+
+def jabra_capture_active(source_name: str) -> bool:
+  if not source_name:
+    return False
+  sources = _pactl_json("sources")
+  index = next((s.get("index") for s in sources if s.get("name") == source_name), None)
+  for item in _pactl_json("source-outputs"):
+    props = item.get("properties") or {}
+    if props.get("target.object") == source_name:
+      return True
+    if index is not None and item.get("source") == index:
+      return True
+  return False
+
+
 class HidSession:
   """Keeps hidraw open so GNP battery reports can arrive between polls."""
 
@@ -404,6 +444,8 @@ class HidSession:
     self.seq = 0
     self.dst = GNP_ADDRS[0]
     self.last_query = 0.0
+    self.last_telephony = 0.0
+    self.telephony_offhook = False
 
   def close(self) -> None:
     if self.fd is not None:
@@ -458,6 +500,26 @@ class HidSession:
         found = parsed
     return found
 
+  def set_telephony(self, off_hook: bool, muted: bool = False, force: bool = False) -> bool:
+    """Drive Off-Hook / Mute LEDs so the buds unmute for a capture stream."""
+    if not self.ensure() or self.fd is None:
+      return False
+    now = _now()
+    if (
+      not force
+      and self.telephony_offhook == bool(off_hook)
+      and now - self.last_telephony < 4.0
+    ):
+      return True
+    try:
+      os.write(self.fd, telephony_report(off_hook, muted))
+    except OSError:
+      self.close()
+      return False
+    self.telephony_offhook = bool(off_hook)
+    self.last_telephony = now
+    return True
+
 
 def cmd_watch() -> int:
   last_json = ""
@@ -466,6 +528,9 @@ def cmd_watch() -> int:
   ev_path = ""
   ev_dev = None
   hid = HidSession()
+  capturing = False
+  next_capture = 0.0
+  sub = None
 
   def reopen():
     nonlocal ev_path, ev_dev
@@ -484,11 +549,44 @@ def cmd_watch() -> int:
     except OSError:
       ev_dev = None
 
+  def reopen_subscribe():
+    nonlocal sub
+    if sub is not None:
+      try:
+        sub.kill()
+      except OSError:
+        pass
+      sub = None
+    import subprocess
+    try:
+      sub = subprocess.Popen(
+        ["pactl", "subscribe"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+      )
+    except OSError:
+      sub = None
+
+  def sync_telephony(scan: bool) -> None:
+    nonlocal capturing, next_capture
+    now = _now()
+    if scan or now >= next_capture:
+      pulse = pulse_status()
+      capturing = jabra_capture_active(str(pulse.get("sourceName") or ""))
+      next_capture = now + 1.5
+      if capturing and pulse.get("sourceName") and pulse.get("micMuted"):
+        _run(["pactl", "set-source-mute", str(pulse["sourceName"]), "0"])
+    hid.set_telephony(capturing or voxtype_recording())
+
   reopen()
+  reopen_subscribe()
   next_poll = 0.0
   next_addr = 0
   while True:
     now = _now()
+    sync_telephony(False)
     if now >= next_poll:
       if hid.ensure() and (hid.last_query == 0.0 or now - hid.last_query >= 5.0):
         if last_battery is None:
@@ -516,15 +614,28 @@ def cmd_watch() -> int:
       fds.append(ev_dev.fd)
     if hid.fd is not None:
       fds.append(hid.fd)
-    timeout = max(0.05, next_poll - _now())
+    if sub is not None and sub.stdout is not None:
+      fds.append(sub.stdout.fileno())
+    timeout = max(0.05, min(0.1, next_poll - _now()))
     try:
       ready, _w, _x = select.select(fds, [], [], timeout)
     except (OSError, ValueError):
       reopen()
+      reopen_subscribe()
       hid.close()
       continue
+    if sub is not None and (sub.poll() is not None):
+      reopen_subscribe()
     if not ready:
       continue
+    if sub is not None and sub.stdout is not None and sub.stdout.fileno() in ready:
+      try:
+        line = sub.stdout.readline()
+      except OSError:
+        line = ""
+        reopen_subscribe()
+      if "source-output" in line:
+        sync_telephony(True)
     if hid.fd is not None and hid.fd in ready:
       probed = hid.read_available()
       if probed:
