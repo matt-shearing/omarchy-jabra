@@ -446,6 +446,33 @@ def voxtype_recording() -> bool:
   return text.strip().lower() == "recording"
 
 
+# The Link 390 answers a hang-up (Off-Hook -> On-Hook) with three
+# KEY_VOLUMEDOWN presses about half a second later: Jabra's host volume sync.
+# Hyprland binds those to the desktop volume keys, so every hang-up knocked
+# 15% off whatever output was default — the Arctis, speakers, anything.
+# Measured 2026-09-14 on tetelestai; a repeated Off-Hook or On-Hook write
+# never fires it, only the transition to On-Hook does.
+VOLUME_SYNC_GRAB_SECS = 1.5
+VOLUME_SYNC_KEYS = ("KEY_VOLUMEDOWN", "KEY_VOLUMEUP")
+
+
+def voice_link_wanted(capturing: bool, jabra_selected: bool, voxtype_rec: bool) -> bool:
+  """Hold the dongle Off-Hook only while its own mic is in play.
+
+  A dictation on a desk mic must leave the buds alone. Asserting Off-Hook for
+  every Voxtype take meant a hang-up after every take, and each hang-up made
+  the dongle turn the desktop volume down.
+  """
+  return bool(capturing or (jabra_selected and voxtype_rec))
+
+
+def telephony_write_needed(same_state: bool, written_before: bool, force: bool) -> bool:
+  """Write the telephony report on a state change, the first time, or on demand."""
+  if force:
+    return True
+  return not (same_state and written_before)
+
+
 def jabra_capture_active(source_name: str) -> bool:
   if not source_name:
     return False
@@ -530,10 +557,8 @@ class HidSession:
     if not self.ensure() or self.fd is None:
       return False
     now = _now()
-    if (
-      not force
-      and self.telephony_offhook == bool(off_hook)
-      and now - self.last_telephony < 0.2
+    if not telephony_write_needed(
+      self.telephony_offhook == bool(off_hook), self.last_telephony > 0.0, force
     ):
       return True
     try:
@@ -557,11 +582,14 @@ def cmd_watch() -> int:
   hotkeys = []
   hid = HidSession()
   capturing = False
+  jabra_selected = False
   next_capture = 0.0
   sub = None
+  grab_until = 0.0
 
   def reopen():
-    nonlocal ev_path, ev_dev, hotkeys
+    nonlocal ev_path, ev_dev, hotkeys, grab_until
+    grab_until = 0.0
     if ev_dev is not None:
       try:
         ev_dev.close()
@@ -582,6 +610,31 @@ def cmd_watch() -> int:
       ev_dev = InputDevice(ev_path)
     except OSError:
       ev_dev = None
+
+  def swallow_volume_sync() -> None:
+    """Grab the dongle's evdev node briefly so its hang-up volume burst never
+    reaches Hyprland. Other taps in that window are dropped too; it is 1.5 s."""
+    nonlocal grab_until
+    if ev_dev is None:
+      return
+    if grab_until <= 0.0:
+      try:
+        ev_dev.grab()
+      except OSError:
+        return
+    grab_until = _now() + VOLUME_SYNC_GRAB_SECS
+
+  def release_grab() -> None:
+    nonlocal grab_until
+    if grab_until <= 0.0:
+      return
+    grab_until = 0.0
+    if ev_dev is None:
+      return
+    try:
+      ev_dev.ungrab()
+    except OSError:
+      pass
 
   def reopen_subscribe():
     nonlocal sub
@@ -608,15 +661,26 @@ def cmd_watch() -> int:
       sub = None
 
   def sync_telephony(scan: bool) -> None:
-    nonlocal capturing, next_capture
+    nonlocal capturing, jabra_selected, next_capture
     now = _now()
     if scan or now >= next_capture:
       pulse = pulse_status()
-      capturing = jabra_capture_active(str(pulse.get("sourceName") or ""))
+      src = str(pulse.get("sourceName") or "")
+      capturing = jabra_capture_active(src)
       next_capture = now + 1.5
-      if capturing and pulse.get("sourceName") and pulse.get("micMuted"):
-        _run(["pactl", "set-source-mute", str(pulse["sourceName"]), "0"])
-    hid.set_telephony(capturing or voxtype_recording())
+      code, default_source, _ = _run(["pactl", "get-default-source"])
+      jabra_selected = bool(src) and src == (default_source or "").strip()
+      # USB Mic sits at 0/5 (-9 dB) until we lift it. That is silence even
+      # when PipeWire mute is off. Do this whether or not hidraw works —
+      # Off-Hook still needs HID, the mixer does not.
+      if capturing or jabra_selected:
+        boost_jabra_capture()
+      if (capturing or jabra_selected) and src and pulse.get("micMuted"):
+        _run(["pactl", "set-source-mute", src, "0"])
+    was_offhook = hid.telephony_offhook
+    hid.set_telephony(voice_link_wanted(capturing, jabra_selected, voxtype_recording()))
+    if was_offhook and not hid.telephony_offhook:
+      swallow_volume_sync()
 
   reopen()
   reopen_subscribe()
@@ -624,6 +688,8 @@ def cmd_watch() -> int:
   next_addr = 0
   while True:
     now = _now()
+    if grab_until > 0.0 and now >= grab_until:
+      release_grab()
     sync_telephony(False)
     if now >= next_poll:
       if hid.ensure() and (hid.last_query == 0.0 or now - hid.last_query >= 5.0):
@@ -686,7 +752,10 @@ def cmd_watch() -> int:
         for event in dev.read():
           if event.type != ecodes.EV_KEY or event.value != 1:
             continue
-          if event.code in (ecodes.KEY_RIGHTCTRL, ecodes.KEY_F9):
+          # Pre-empt Voxtype's stream open only when it will land on the
+          # dongle mic. On a desk mic this used to hang up 0.2 s later and
+          # fire the volume burst on every Right Ctrl press.
+          if event.code in (ecodes.KEY_RIGHTCTRL, ecodes.KEY_F9) and jabra_selected:
             hid.set_telephony(True, force=True)
       except OSError:
         reopen()
@@ -714,6 +783,8 @@ def cmd_watch() -> int:
           key = f"KEY_{event.code}"
         if isinstance(key, list):
           key = key[0]
+        if grab_until > 0.0 and key in VOLUME_SYNC_KEYS:
+          continue  # the hang-up volume sync, swallowed on purpose
         last_gesture = {
           "key": key,
           "label": key_label(key),

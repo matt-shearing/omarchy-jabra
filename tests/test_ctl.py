@@ -125,6 +125,25 @@ class TelephonyHost(unittest.TestCase):
     self.assertEqual(self.ctl.telephony_report(True, muted=True), b"\x02\x03\x00")
     self.assertEqual(self.ctl.telephony_report(False), b"\x02\x00\x00")
 
+  def test_voice_link_only_for_the_dongle_mic(self):
+    want = self.ctl.voice_link_wanted
+    self.assertTrue(want(True, False, False))     # something captures the buds
+    self.assertTrue(want(False, True, True))      # Voxtype on the buds
+    self.assertFalse(want(False, False, True))    # Voxtype on a desk mic
+    self.assertFalse(want(False, True, False))    # buds selected, nothing recording
+    self.assertFalse(want(False, False, False))
+
+  def test_telephony_report_written_on_change_only(self):
+    need = self.ctl.telephony_write_needed
+    self.assertTrue(need(same_state=False, written_before=True, force=False))
+    self.assertTrue(need(same_state=True, written_before=False, force=False))
+    self.assertTrue(need(same_state=True, written_before=True, force=True))
+    self.assertFalse(need(same_state=True, written_before=True, force=False))
+
+  def test_volume_sync_constants(self):
+    self.assertGreaterEqual(self.ctl.VOLUME_SYNC_GRAB_SECS, 1.0)
+    self.assertIn("KEY_VOLUMEDOWN", self.ctl.VOLUME_SYNC_KEYS)
+
   def test_voxtype_recording_state(self):
     import os
     import tempfile
