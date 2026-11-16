@@ -262,7 +262,23 @@ def find_hotkey_devices() -> list:
   return found
 
 
+def input_nodes() -> tuple:
+  """Cheap fingerprint of the evdev nodes, to rescan only when it changes."""
+  try:
+    return tuple(sorted(n for n in os.listdir("/dev/input") if n.startswith("event")))
+  except OSError:
+    return ()
+
+
 def find_evdev() -> str:
+  # Match on the sysfs name first: opening every node to read its name, and
+  # the close that follows, blocks in synchronize_rcu for ~40 ms a device.
+  sys_input = Path("/sys/class/input")
+  if sys_input.is_dir():
+    for node in sorted(sys_input.glob("event*")):
+      if _is_jabra_text(_read_text(node / "device" / "name")):
+        return str(Path("/dev/input") / node.name)
+    return ""
   try:
     from evdev import InputDevice, list_devices
   except ImportError:
@@ -521,6 +537,13 @@ class HidSession:
     self.path = ""
 
   def ensure(self) -> bool:
+    # The watch loop calls this ~10x a second. hidraw_status() opens and
+    # closes the node to test access, and each close blocks in
+    # synchronize_rcu — the watcher sat in D state half the time and kept
+    # the load average and IO pressure up. While our fd is open and the node
+    # still exists, trust it; a failed read or write closes it and re-probes.
+    if self.fd is not None and self.path and os.path.exists(self.path):
+      return True
     info = hidraw_status()
     path = str(info.get("hidraw") or "")
     if info.get("hidAccess") != "ok" or not path:
@@ -599,9 +622,12 @@ def cmd_watch() -> int:
   sub = None
   grab_until = 0.0
 
+  scanned_nodes: tuple = ()
+
   def reopen():
-    nonlocal ev_path, ev_dev, hotkeys, grab_until
+    nonlocal ev_path, ev_dev, hotkeys, grab_until, scanned_nodes
     grab_until = 0.0
+    scanned_nodes = input_nodes()
     if ev_dev is not None:
       try:
         ev_dev.close()
@@ -725,7 +751,9 @@ def cmd_watch() -> int:
         emit(snap)
         last_json = encoded
       next_poll = now + 1.5
-      if ev_dev is None:
+      # Without the dongle this used to rescan every poll: ~0.9 s of opening
+      # and closing every input node, half the watcher's life in D state.
+      if ev_dev is None and input_nodes() != scanned_nodes:
         reopen()
 
     fds = []
